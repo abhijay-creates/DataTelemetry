@@ -1,0 +1,4 @@
+what is done:
+new parameters with parameter getting some actual data.
+sliders are made proper
+drop downs

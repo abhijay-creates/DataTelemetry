@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DICV Telemetry Dashboard</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+</head>
+<body>
+    <img class="image" src="logo.svg" alt="DICV">
+    <div id="root"></div>
+    
+    <script type="text/javascript">
+        const { useState, useEffect } = React;
+        
+        // 12 standard parameters as placeholders with units
+        const placeholderParams = [
+            { name: 'speed', type: 'number', min: 0, max: 120, enabled: true, units: 'km/hr' },
+            { name: 'fuellevel', type: 'number', min: 10, max: 100, enabled: true, units: '%' },
+            { name: 'enginetemp', type: 'number', min: 60, max: 110, enabled: true, units: '°C' },
+            { name: 'latitude', type: 'number', min: 12.8341, max: 13.1414, enabled: true, units: '°' },
+            { name: 'longitude', type: 'number', min: 77.4489, max: 77.7845, enabled: true, units: '°' },
+            { name: 'enginerpm', type: 'number', min: 800, max: 3500, enabled: true, units: 'rpm' },
+            { name: 'batteryvoltage', type: 'number', min: 11.5, max: 14.4, enabled: true, units: 'V' },
+            { name: 'odometer', type: 'number', min: 50000, max: 500000, enabled: true, units: 'km' },
+            { name: 'enginestatus', type: 'characters', length: 8, enabled: true, units: '' },
+            { name: 'brakestatus', type: 'characters', length: 8, enabled: true, units: '' },
+            { name: 'doorstatus', type: 'characters', length: 8, enabled: true, units: '' },
+            { name: 'airpressure', type: 'number', min: 80, max: 120, enabled: true, units: 'psi' }
+        ];
+        
+        function App() {
+            const [params, setParams] = useState([...placeholderParams]);
+            const [globalInterval, setGlobalInterval] = useState(5);
+            const [client, setClient] = useState(null);
+            const [data, setData] = useState([]);
+            const [connected, setConnected] = useState(false);
+            const [streaming, setStreaming] = useState(false);
+            
+            useEffect(() => {
+                const mqttClient = mqtt.connect('wss://test.mosquitto.org:8081');
+                
+                mqttClient.on('connect', () => {
+                    setConnected(true);
+                    mqttClient.subscribe('truck/sensor/data');
+                });
+                
+                mqttClient.on('disconnect', () => {
+                    setConnected(false);
+                });
+                
+                mqttClient.on('error', () => {
+                    setConnected(false);
+                });
+                
+                mqttClient.on('message', (topic, message) => {
+                    if (!streaming) return;
+                    
+                    try {
+                        const newData = JSON.parse(message.toString());
+                        setData(prev => [...prev.slice(-49), newData]);
+                    } catch (e) {
+                        // ignore parsing errors
+                    }
+                });
+                
+                setClient(mqttClient);
+                
+                return () => {
+                    mqttClient.end();
+                };
+            }, [streaming]);
+            
+            function addParam() {
+                setParams(prev => [...prev, { 
+                    name: '', 
+                    type: 'number', 
+                    min: 0, 
+                    max: 100, 
+                    enabled: true,
+                    units: ''
+                }]);
+            }
+            
+            function removeParam(idx) {
+                setParams(prev => prev.filter((_, i) => i !== idx));
+            }
+            
+            function updateParam(idx, field, value) {
+                setParams(prev => prev.map((p, i) => i === idx ? { ...p, [field]: value } : p));
+            }
+            
+            function updateParamSynced(idx, field, value, min, max) {
+                let val = value ? parseFloat(value) : value;
+                if (val !== '' && !isNaN(val)) {
+                    if (field === 'min' && val > params[idx].max) val = params[idx].max;
+                    if (field === 'max' && val < params[idx].min) val = params[idx].min;
+                    if (val < min) val = min;
+                    if (val > max) val = max;
+                }
+                updateParam(idx, field, val);
+            }
+            
+            function updateGlobalIntervalSynced(value, min, max) {
+                let val = value ? parseFloat(value) : value;
+                if (val !== '' && !isNaN(val)) {
+                    if (val < min) val = min;
+                    if (val > max) val = max;
+                }
+                setGlobalInterval(val);
+            }
+            
+            function sendConfig() {
+                if (!client || !connected) return;
+                
+                const configPayload = {};
+                params.forEach(p => {
+                    if (!p.enabled || !p.name.trim()) return;
+                    
+                    configPayload[p.name] = {
+                        type: p.type,
+                        interval: Number(globalInterval)
+                    };
+                    
+                    if (p.type === 'number') {
+                        configPayload[p.name].min = Number(p.min);
+                        configPayload[p.name].max = Number(p.max);
+                    }
+                    
+                    if (p.type === 'characters') {
+                        configPayload[p.name].length = Number(p.length || 10);
+                    }
+                    
+                    if (p.type === 'alphanumeric') {
+                        configPayload[p.name].lettersLength = Number(p.lettersLength || 4);
+                        configPayload[p.name].numbersLength = Number(p.numbersLength || 4);
+                    }
+                });
+                
+                client.publish('truck/control/config', JSON.stringify(configPayload));
+            }
+            
+            function startStream() {
+                setData([]);
+                setStreaming(true);
+                sendConfig();
+            }
+            
+            function stopStream() {
+                setStreaming(false);
+            }
+            
+            function renderParamRow(p, idx) {
+                return React.createElement('div', { key: idx, className: 'param-row' }, 
+                    React.createElement('input', { 
+                        type: 'checkbox', 
+                        checked: p.enabled,
+                        onChange: (e) => updateParam(idx, 'enabled', e.target.checked) 
+                    }),
+                    React.createElement('input', { 
+                        type: 'text', 
+                        value: p.name, 
+                        placeholder: 'Parameter name',
+                        onChange: (e) => updateParam(idx, 'name', e.target.value)
+                    }),
+                    React.createElement('input', { 
+                        type: 'text', 
+                        value: p.units || '', 
+                        placeholder: 'Units',
+                        className: 'units-input',
+                        onChange: (e) => updateParam(idx, 'units', e.target.value)
+                    }),
+                    React.createElement('select', { 
+                        value: p.type, 
+                        onChange: (e) => updateParam(idx, 'type', e.target.value),
+                        className: 'param-type-dropdown'
+                    }, 
+                        React.createElement('option', { value: 'number' }, 'Numbers'),
+                        React.createElement('option', { value: 'characters' }, 'Characters'),
+                        React.createElement('option', { value: 'alphanumeric' }, 'Alphanumeric')
+                    ),
+                    
+                    p.type === 'number' ? React.createElement(React.Fragment, null,
+                        React.createElement('div', { className: 'slider-row' },
+                            React.createElement('span', { className: 'slider-label' }, 'Min:'),
+                            React.createElement('input', { 
+                                type: 'range', 
+                                min: -1000000000, 
+                                max: 1000000000, 
+                                step: 1, 
+                                value: p.min, 
+                                disabled: !p.enabled,
+                                className: 'slider',
+                                onChange: (e) => updateParam(idx, 'min', parseFloat(e.target.value)) 
+                            }),
+                            React.createElement('input', { 
+                                type: 'number', 
+                                className: 'number-input', 
+                                min: -1000000000, 
+                                max: p.max, 
+                                value: p.min, 
+                                disabled: !p.enabled,
+                                onChange: (e) => updateParamSynced(idx, 'min', e.target.value, -1000000000, p.max) 
+                            })
+                        ),
+                        React.createElement('div', { className: 'slider-row' },
+                            React.createElement('span', { className: 'slider-label' }, 'Max:'),
+                            React.createElement('input', { 
+                                type: 'range', 
+                                min: p.min, 
+                                max: 1000000000, 
+                                step: 1, 
+                                value: p.max, 
+                                disabled: !p.enabled,
+                                className: 'slider',
+                                onChange: (e) => updateParam(idx, 'max', parseFloat(e.target.value)) 
+                            }),
+                            React.createElement('input', { 
+                                type: 'number', 
+                                className: 'number-input', 
+                                min: p.min, 
+                                max: 1000000000, 
+                                value: p.max, 
+                                disabled: !p.enabled,
+                                onChange: (e) => updateParamSynced(idx, 'max', e.target.value, p.min, 1000000000) 
+                            })
+                        )
+                    ) : null,
+                    
+                    p.type === 'characters' ? React.createElement(React.Fragment, null,
+                        React.createElement('div', { className: 'slider-row' },
+                            React.createElement('span', { className: 'slider-label' }, 'Length:'),
+                            React.createElement('input', { 
+                                type: 'range', 
+                                min: 1, 
+                                max: 100, 
+                                step: 1, 
+                                value: p.length || 10, 
+                                disabled: !p.enabled,
+                                className: 'slider',
+                                onChange: (e) => updateParam(idx, 'length', parseInt(e.target.value)) 
+                            }),
+                            React.createElement('input', { 
+                                type: 'number', 
+                                className: 'number-input', 
+                                min: 1, 
+                                max: 100, 
+                                step: 1, 
+                                value: p.length || 10, 
+                                disabled: !p.enabled,
+                                onChange: (e) => updateParamSynced(idx, 'length', e.target.value, 1, 100) 
+                            })
+                        )
+                    ) : null,
+                    
+                    p.type === 'alphanumeric' ? React.createElement(React.Fragment, null,
+                        React.createElement('div', { className: 'slider-row' },
+                            React.createElement('span', { className: 'slider-label' }, 'Letters:'),
+                            React.createElement('input', { 
+                                type: 'range', 
+                                min: 1, 
+                                max: 50, 
+                                step: 1, 
+                                value: p.lettersLength || 4, 
+                                disabled: !p.enabled,
+                                className: 'slider',
+                                onChange: (e) => updateParam(idx, 'lettersLength', parseInt(e.target.value)) 
+                            }),
+                            React.createElement('input', { 
+                                type: 'number', 
+                                className: 'number-input', 
+                                min: 1, 
+                                max: 50, 
+                                step: 1, 
+                                value: p.lettersLength || 4, 
+                                disabled: !p.enabled,
+                                onChange: (e) => updateParamSynced(idx, 'lettersLength', e.target.value, 1, 50) 
+                            })
+                        ),
+                        React.createElement('div', { className: 'slider-row' },
+                            React.createElement('span', { className: 'slider-label' }, 'Numbers:'),
+                            React.createElement('input', { 
+                                type: 'range', 
+                                min: 1, 
+                                max: 50, 
+                                step: 1, 
+                                value: p.numbersLength || 4, 
+                                disabled: !p.enabled,
+                                className: 'slider',
+                                onChange: (e) => updateParam(idx, 'numbersLength', parseInt(e.target.value)) 
+                            }),
+                            React.createElement('input', { 
+                                type: 'number', 
+                                className: 'number-input', 
+                                min: 1, 
+                                max: 50, 
+                                step: 1, 
+                                value: p.numbersLength || 4, 
+                                disabled: !p.enabled,
+                                onChange: (e) => updateParamSynced(idx, 'numbersLength', e.target.value, 1, 50) 
+                            })
+                        )
+                    ) : null,
+                    
+                    React.createElement('button', { 
+                        className: 'remove-btn', 
+                        onClick: () => removeParam(idx),
+                        title: 'Remove parameter' 
+                    }, '×')
+                );
+            }
+            
+            function renderDataItem(item, idx) {
+                return React.createElement('div', { key: idx, className: 'data-item' },
+                    React.createElement('div', { className: 'truck-id' }, `Truck ID: ${item.truckid}`),
+                    React.createElement('div', { className: 'data-grid' },
+                        params.filter(p => p.enabled && p.name).map(p => 
+                            React.createElement('div', { key: p.name, className: 'data-field' },
+                                React.createElement('div', { className: 'data-field-content' },
+                                    React.createElement('div', { className: 'data-field-label' }, p.name),
+                                    React.createElement('div', { className: 'data-field-value' }, 
+                                        typeof item.data === 'object' && item.data[p.name] !== undefined ? 
+                                        String(item.data[p.name]) : '-'
+                                    )  
+                                ),
+                                p.units ? React.createElement('div', { className: 'data-field-unit' }, p.units) : null
+                            )
+                        )
+                    ),
+                    React.createElement('div', { style: { color: '#888', fontSize: '12px', marginTop: '6px' } }, item.timestamp)
+                );
+            }
+            
+            return React.createElement('div', { className: 'dashboard-container' },
+                React.createElement('div', { className: 'header' },
+                    React.createElement('h1', null, 'DICV Telemetry Dashboard'),
+                    React.createElement('div', { className: 'status-indicator' },
+                        React.createElement('div', { className: `status-dot ${connected ? 'status-connected' : 'status-disconnected'}` }),
+                        React.createElement('span', null, connected ? 'Connected' : 'Disconnected')
+                    )
+                ),
+                React.createElement('div', { className: 'main-content' },
+                    React.createElement('div', { className: 'config-panel' },
+                        React.createElement('h3', null, 'Parameters'),
+                        params.map(renderParamRow),
+                        React.createElement('button', { onClick: addParam, className: 'add-btn' }, 'Add Parameter'),
+                        
+                        React.createElement('div', { className: 'interval-section' },
+                            React.createElement('div', { className: 'interval-label' }, 'Transmission Interval'),
+                            React.createElement('div', { className: 'interval-control' },
+                                React.createElement('input', { 
+                                    type: 'range', 
+                                    min: 0.1, 
+                                    max: 60, 
+                                    step: 0.1, 
+                                    value: globalInterval,
+                                    className: 'interval-slider',
+                                    onChange: (e) => setGlobalInterval(parseFloat(e.target.value)) 
+                                }),
+                                React.createElement('div', { className: 'interval-display' },
+                                    React.createElement('span', { className: 'interval-value' }, globalInterval),
+                                    React.createElement('span', { className: 'interval-unit' }, 's')
+                                )
+                            )
+                        ),
+                        
+                        React.createElement('div', { className: 'control-buttons' },
+                            React.createElement('button', { 
+                                className: 'btn btn-start', 
+                                onClick: startStream, 
+                                disabled: !connected 
+                            }, 'Start Stream'),
+                            React.createElement('button', { 
+                                className: 'btn btn-stop', 
+                                onClick: stopStream 
+                            }, 'Stop Stream')
+                        )
+                    ),
+                    React.createElement('div', { className: 'data-panel' },
+                        React.createElement('div', { className: 'data-header' },
+                            React.createElement('h3', null, 'Live Telemetry Data'),
+                            React.createElement('div', { className: 'data-count' }, `${data.length} data points`)
+                        ),
+                        streaming ? (
+                            data.length === 0 ? 
+                                React.createElement('div', { className: 'no-data' }, 'Waiting for data...') :
+                                data.slice().reverse().map(renderDataItem)
+                        ) : React.createElement('div', { className: 'stream-stopped' }, 'Stream is stopped. Click "Start Stream" to begin receiving data.')
+                    )
+                )
+            );
+        }
+        
+        ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+    </script>
+</body>
+</html>
